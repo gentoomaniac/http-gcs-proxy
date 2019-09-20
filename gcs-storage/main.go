@@ -28,6 +28,7 @@ var log = loggo.GetLogger("main")
 var recipient *openpgp.Entity
 var ctx context.Context
 var bucket *storage.BucketHandle
+var bucketAttrs *storage.BucketAttrs
 
 type Response struct {
 	status  string
@@ -95,6 +96,24 @@ func pgpEncrypt(data []byte, recip []*openpgp.Entity, signer *openpgp.Entity) ([
 	return encbuf.Bytes(), err
 }
 
+func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) {
+	log.Debugf("GPG encrypting file ...")
+	encrypted, err := pgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
+	if err != nil {
+		log.Errorf("%s", err)
+		return
+	}
+
+	//asyncUpload := r.Header.Get("Async-processing")
+	log.Debugf("Uploading object: %s", gcsObjectName)
+	_, _, err = sendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(encrypted), customMetadata, false)
+	if err != nil {
+		log.Errorf("%s", err)
+		return
+	}
+	log.Debugf("File successfully uploaded")
+}
+
 func uploadFile(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("File Upload Endpoint Hit")
 
@@ -116,15 +135,15 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	checksum := sha256.Sum256(fileBytes)
 
-	encrypted, err := pgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
-	if err != nil {
-		log.Errorf("%s", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	gcsObjectName := r.Header.Get("Object-Name")
+	if gcsObjectName == "" {
+		gcsObjectName = fmt.Sprintf("%x", sha256.Sum256(fileBytes))
 	}
-
+	gcsObjectPath := r.Header.Get("Object-Path")
+	if gcsObjectPath != "" {
+		gcsObjectName = strings.TrimPrefix(gcsObjectPath, "/") + "/" + gcsObjectName
+	}
 	customMetadata := make(map[string]string)
 	for k, values := range r.Header {
 		if strings.HasPrefix(k, "__") {
@@ -137,24 +156,20 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	gcsObjectName := r.Header.Get("Object-Name")
-	if gcsObjectName == "" {
-		gcsObjectName = fmt.Sprintf("%x", sha256.Sum256(fileBytes))
-	}
-	gcsObjectPath := r.Header.Get("Object-Path")
-	if gcsObjectPath != "" {
-		gcsObjectName = strings.TrimPrefix(gcsObjectPath, "/") + "/" + gcsObjectName
-	}
-	log.Debugf("Uploading object to %s", gcsObjectName)
-
-	_, _, err = sendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(encrypted), customMetadata, false)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	response := Response{
-		status:  "success",
-		payload: fmt.Sprintf("%x", checksum),
+	var response Response
+	asyncUpload := r.Header.Get("Async-processing")
+	if asyncUpload == "true" {
+		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
+		response = Response{
+			status:  "async",
+			payload: fmt.Sprintf("%s", gcsObjectName),
+		}
+	} else {
+		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
+		response = Response{
+			status:  "success",
+			payload: fmt.Sprintf("%s", gcsObjectName),
+		}
 	}
 
 	js, err := json.Marshal(response)
@@ -163,7 +178,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	log.Debugf("Request processed")
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(js)
 }
@@ -197,7 +212,7 @@ func main() {
 
 	bucketName := getenv("GCS_BUCKET", "encrypted_data")
 	bucket = client.Bucket(bucketName)
-	if _, err = bucket.Attrs(ctx); err != nil {
+	if bucketAttrs, err = bucket.Attrs(ctx); err != nil {
 		switch err {
 		case storage.ErrBucketNotExist:
 			log.Errorf("Bucket doesn't exist: %s", bucketName)
