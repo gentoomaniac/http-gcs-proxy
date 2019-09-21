@@ -2,6 +2,11 @@ package encryption
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
+	"io"
 	"os"
 
 	"github.com/juju/loggo"
@@ -41,4 +46,44 @@ func PgpEncrypt(data []byte, recip []*openpgp.Entity, signer *openpgp.Entity) ([
 	pgpMessage.Close()
 
 	return encbuf.Bytes(), err
+}
+
+func Encrypt(plaintext []byte, password []byte, packetConfig *packet.Config) (ciphertext []byte, err error) {
+
+	encbuf := bytes.NewBuffer(nil)
+
+	pt, _ := openpgp.SymmetricallyEncrypt(encbuf, password, nil, packetConfig)
+
+	_, err = pt.Write(plaintext)
+	if err != nil {
+		return
+	}
+
+	pt.Close()
+	ciphertext = encbuf.Bytes()
+
+	return
+}
+
+func AES256(data []byte, secret string) []byte {
+	key, _ := hex.DecodeString(secret)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	// Never use more than 2^32 random nonces with a given key because of the risk of a repeat.
+	nonce := make([]byte, 12)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		panic(err.Error())
+	}
+
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	ciphertext := aesgcm.Seal(nil, nonce, data, nil)
+	return ciphertext
 }
