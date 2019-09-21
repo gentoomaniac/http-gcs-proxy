@@ -1,7 +1,3 @@
-// Copyright 2010 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 package main
 
 import (
@@ -10,15 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"strings"
 
+	"../libs/encryption"
+	"../libs/env"
+	"../libs/gcs"
+
 	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/armor"
-	"golang.org/x/crypto/openpgp/packet"
 
 	"cloud.google.com/go/storage"
 	"github.com/juju/loggo"
@@ -35,78 +32,16 @@ type Response struct {
 	payload string
 }
 
-func sendToGCS(ctx context.Context, bucketObject *storage.BucketHandle, objectName string, r io.Reader, metadata map[string]string, public bool) (*storage.ObjectHandle, *storage.ObjectAttrs, error) {
-	log.Debugf("Sending encrypted data to GCS: %s", objectName)
-	obj := bucketObject.Object(objectName)
-
-	w := obj.NewWriter(ctx)
-	newAttrs := w.ObjectAttrs
-	newAttrs.Metadata = metadata
-	w.ObjectAttrs = newAttrs
-
-	if _, err := io.Copy(w, r); err != nil {
-		log.Errorf("%s", err)
-		return nil, nil, err
-	}
-
-	if err := w.Close(); err != nil {
-		log.Errorf("%s", err)
-		return nil, nil, err
-	}
-
-	if public {
-		if err := obj.ACL().Set(ctx, storage.AllUsers, storage.RoleReader); err != nil {
-			log.Errorf("%s", err)
-			return nil, nil, err
-		}
-	}
-
-	attrs, err := obj.Attrs(ctx)
-	return obj, attrs, err
-}
-
-func readEntity(name string) (*openpgp.Entity, error) {
-	log.Debugf("loading entity: %s", name)
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	block, err := armor.Decode(f)
-	if err != nil {
-		return nil, err
-	}
-	return openpgp.ReadEntity(packet.NewReader(block.Body))
-}
-
-func pgpEncrypt(data []byte, recip []*openpgp.Entity, signer *openpgp.Entity) ([]byte, error) {
-	log.Debugf("Encrypting %d bytes ...", len(data))
-
-	encbuf := bytes.NewBuffer(nil)
-	pgpMessage, err := openpgp.Encrypt(encbuf, recip, nil, &openpgp.FileHints{IsBinary: true}, nil)
-	if err != nil {
-		return nil, err
-	}
-	_, err = pgpMessage.Write(data)
-	if err != nil {
-		return nil, err
-	}
-	pgpMessage.Close()
-
-	return encbuf.Bytes(), err
-}
-
 func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) {
 	log.Debugf("GPG encrypting file ...")
-	encrypted, err := pgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
+	encrypted, err := encryption.PgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
 	if err != nil {
 		log.Errorf("%s", err)
 		return
 	}
 
-	//asyncUpload := r.Header.Get("Async-processing")
 	log.Debugf("Uploading object: %s", gcsObjectName)
-	_, _, err = sendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(encrypted), customMetadata, false)
+	_, _, err = gcs.SendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(encrypted), customMetadata, false)
 	if err != nil {
 		log.Errorf("%s", err)
 		return
@@ -183,18 +118,10 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	w.Write(js)
 }
 
-func getenv(name string, defaultValue string) string {
-	value := os.Getenv(name)
-	if value == "" {
-		return defaultValue
-	}
-	return value
-}
-
 func main() {
-	loggo.ConfigureLoggers(getenv("LOGGING_CONFIG", "main=DEBUG"))
+	loggo.ConfigureLoggers(env.GetenvDefault("LOGGING_CONFIG", "main=DEBUG"))
 
-	rec, err := readEntity(getenv("PGP_PUBLIC_KEY", "/tmp/pubKey.asc"))
+	rec, err := encryption.ReadEntity(env.GetenvDefault("PGP_PUBLIC_KEY", "/tmp/pubKey.asc"))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -210,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	bucketName := getenv("GCS_BUCKET", "encrypted_data")
+	bucketName := env.GetenvDefault("GCS_BUCKET", "encrypted_data")
 	bucket = client.Bucket(bucketName)
 	if bucketAttrs, err = bucket.Attrs(ctx); err != nil {
 		switch err {
@@ -228,5 +155,5 @@ func main() {
 	//fs := http.FileServer(http.Dir("static/"))
 	//http.Handle("/static/", http.StripPrefix("/static/", fs))
 	http.HandleFunc("/upload", uploadFile)
-	http.ListenAndServe(fmt.Sprintf("%s:%s", getenv("LISTEN_ADDRESS", "127.0.0.1"), getenv("LISTEN_PORT", "8080")), nil)
+	http.ListenAndServe(fmt.Sprintf("%s:%s", env.GetenvDefault("LISTEN_ADDRESS", "127.0.0.1"), env.GetenvDefault("LISTEN_PORT", "8080")), nil)
 }
