@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"io"
+	"io/ioutil"
 
 	"cloud.google.com/go/storage"
 	"github.com/juju/loggo"
@@ -38,4 +39,21 @@ func SendToGCS(ctx context.Context, bucketObject *storage.BucketHandle, objectNa
 
 	attrs, err := obj.Attrs(ctx)
 	return obj, attrs, err
+}
+
+// readFile reads the named file in Google Cloud Storage.
+func ReadFile(ctx context.Context, bucketObject *storage.BucketHandle, fileName string) []byte {
+	rc, err := bucketObject.Object(fileName).NewReader(ctx)
+	if err != nil {
+		log.Errorf("unable to open file from bucket: %s, %v", fileName, err)
+		return nil
+	}
+	defer rc.Close()
+	data, err := ioutil.ReadAll(rc)
+	if err != nil {
+		log.Errorf("unable to read data from bucket: %s, %v", fileName, err)
+		return nil
+	}
+
+	return data
 }
