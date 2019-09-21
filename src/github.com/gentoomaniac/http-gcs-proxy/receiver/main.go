@@ -27,11 +27,6 @@ var ctx context.Context
 var bucket *storage.BucketHandle
 var bucketAttrs *storage.BucketAttrs
 
-type Response struct {
-	status  string
-	payload string
-}
-
 func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) {
 	log.Debugf("GPG encrypting file ...")
 	encrypted, err := encryption.PgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
@@ -91,20 +86,28 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var response Response
+	response := map[string]interface{}{}
 	asyncUpload := r.Header.Get("Async-processing")
 	if asyncUpload == "true" {
 		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
-		response = Response{
-			status:  "async",
-			payload: fmt.Sprintf("%s", gcsObjectName),
+		response = map[string]interface{}{
+			"status":     "started",
+			"details":    "upload in progress",
+			"objectName": gcsObjectName,
+			"uri":        fmt.Sprintf("gcs://%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
+			"linkUrl":    fmt.Sprintf("https://storage.cloud.google.com/%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 		}
+		w.WriteHeader(http.StatusOK)
 	} else {
 		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
-		response = Response{
-			status:  "success",
-			payload: fmt.Sprintf("%s", gcsObjectName),
+		response = map[string]interface{}{
+			"status":     "success",
+			"details":    "file successfully uploaded",
+			"objectName": gcsObjectName,
+			"uri":        fmt.Sprintf("gcs://%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
+			"linkUrl":    fmt.Sprintf("https://storage.cloud.google.com/%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 		}
+		w.WriteHeader(http.StatusOK)
 	}
 
 	js, err := json.Marshal(response)
