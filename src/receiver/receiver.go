@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/openpgp"
 
 	"cloud.google.com/go/storage"
+	"github.com/gorilla/mux"
 	"github.com/juju/loggo"
 )
 
@@ -27,21 +28,56 @@ var ctx context.Context
 var bucket *storage.BucketHandle
 var bucketAttrs *storage.BucketAttrs
 
-func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) {
-	log.Debugf("GPG encrypting file ...")
-	encrypted, err := encryption.PgpEncrypt(fileBytes, []*openpgp.Entity{recipient}, nil)
+func sendResponse(response map[string]interface{}, httpStatus int, w http.ResponseWriter) {
+	js, err := json.Marshal(response)
 	if err != nil {
-		log.Errorf("%s", err)
+		log.Errorf("Error processing json response: %s", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	w.WriteHeader(httpStatus)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+}
+
+func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string, encryptionType string, passphrase string) (err error) {
+	data := fileBytes
+	switch encryptionType {
+
+	case "pubkey":
+		log.Debugf("Encrypting data with gpg pubkey ...")
+		data, err = encryption.PgpPubkey(fileBytes, []*openpgp.Entity{recipient}, nil)
+		if err != nil {
+			log.Errorf("Encryption failed: %s", err)
+			return
+		}
+	case "symmetric":
+		log.Debugf("Encrypting data with gpg symmetric key ...")
+		data, err = encryption.PgpSymmetric(fileBytes, passphrase)
+		if err != nil {
+			log.Errorf("Encryption failed: %s", err)
+			return
+		}
+	case "plain":
+		log.Debugf("Encrypting data with symmetric key ...")
+		data, err = encryption.AES256(fileBytes, passphrase)
+		if err != nil {
+			log.Errorf("Encryption failed: %s", err)
+			return
+		}
+	default:
+		log.Debugf("Skipping encryption ...")
+	}
+
 	log.Debugf("Uploading object: %s", gcsObjectName)
-	_, _, err = gcs.SendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(encrypted), customMetadata, false)
+	_, _, err = gcs.SendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(data), customMetadata, false)
 	if err != nil {
 		log.Errorf("%s", err)
 		return
 	}
 	log.Debugf("File successfully uploaded")
+	return
 }
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
@@ -87,9 +123,53 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{}
+	encryptionType := strings.ToLower(r.Header.Get("Encryption-Type"))
+	symmkey := ""
+	switch encryptionType {
+	case "none":
+	case "plain":
+		symmkey = r.Header.Get("Symmkey")
+		if symmkey == "" {
+			log.Errorf("No value for 'Symmkey'")
+			response = map[string]interface{}{
+				"status":  "missing_parameters",
+				"details": "'Symmkey' not specified",
+			}
+			sendResponse(response, http.StatusBadRequest, w)
+			return
+		}
+	case "pubkey":
+	case "symmetric":
+		symmkey = r.Header.Get("Symmkey")
+		if symmkey == "" {
+			log.Errorf("No value for 'Symmkey'")
+			response = map[string]interface{}{
+				"status":  "missing_parameters",
+				"details": "'Symmkey' not specified",
+			}
+			sendResponse(response, http.StatusBadRequest, w)
+			return
+		}
+	case "":
+		log.Errorf("No value for 'Encryption-Type'")
+		response = map[string]interface{}{
+			"status":  "missing_parameters",
+			"details": "'Encryption-Type' not specified",
+		}
+		sendResponse(response, http.StatusBadRequest, w)
+		return
+	default:
+		log.Errorf("Value for 'Encryption-Type' invalid value: %s", encryptionType)
+		response = map[string]interface{}{
+			"status":  "not_supported",
+			"details": "Value for 'Encryption-Type' not supported",
+		}
+		sendResponse(response, http.StatusBadRequest, w)
+		return
+	}
 	asyncUpload := r.Header.Get("Async-processing")
 	if asyncUpload == "true" {
-		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
+		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName, encryptionType, symmkey)
 		response = map[string]interface{}{
 			"status":     "started",
 			"details":    "upload in progress",
@@ -97,9 +177,9 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 			"uri":        fmt.Sprintf("gcs://%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 			"linkUrl":    fmt.Sprintf("https://storage.cloud.google.com/%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 		}
-		w.WriteHeader(http.StatusOK)
+		sendResponse(response, http.StatusOK, w)
 	} else {
-		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
+		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName, encryptionType, symmkey)
 		response = map[string]interface{}{
 			"status":     "success",
 			"details":    "file successfully uploaded",
@@ -107,18 +187,9 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 			"uri":        fmt.Sprintf("gcs://%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 			"linkUrl":    fmt.Sprintf("https://storage.cloud.google.com/%s/%s", env.GetenvDefault("GCS_BUCKET", "encrypted_data"), gcsObjectName),
 		}
-		w.WriteHeader(http.StatusOK)
+		sendResponse(response, http.StatusOK, w)
 	}
-
-	js, err := json.Marshal(response)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	log.Debugf("Request processed")
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(js)
+	return
 }
 
 func main() {
@@ -126,8 +197,8 @@ func main() {
 
 	rec, err := encryption.ReadEntity(env.GetenvDefault("PGP_PUBLIC_KEY", "/tmp/pubKey.asc"))
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Errorf("Could not read publik key: %s", err)
+		os.Exit(3)
 	}
 	recipient = rec
 
@@ -154,9 +225,7 @@ func main() {
 	}
 
 	log.Debugf("starting server ...")
-
-	//fs := http.FileServer(http.Dir("static/"))
-	//http.Handle("/static/", http.StripPrefix("/static/", fs))
-	http.HandleFunc("/upload", uploadFile)
-	http.ListenAndServe(fmt.Sprintf("%s:%s", env.GetenvDefault("LISTEN_ADDRESS", "127.0.0.1"), env.GetenvDefault("LISTEN_PORT", "8080")), nil)
+	router := mux.NewRouter().StrictSlash(true)
+	router.HandleFunc("/upload", uploadFile).Methods("POST")
+	http.ListenAndServe(fmt.Sprintf("%s:%s", env.GetenvDefault("LISTEN_ADDRESS", "127.0.0.1"), env.GetenvDefault("LISTEN_PORT", "8080")), router)
 }
