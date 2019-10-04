@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"io/ioutil"
 	"os"
 
@@ -56,5 +55,5 @@ func main() {
 
 	encryptedData, _ := ioutil.ReadAll(os.Stdin)
 	key, _ := base64.StdEncoding.DecodeString(*secret)
-	fmt.Printf("%08b", decrypt(encryptedData, key))
+	os.Stdout.Write(decrypt(encryptedData, key))
 }
