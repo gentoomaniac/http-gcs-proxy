@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 
 	"../libs/encryption"
@@ -27,6 +29,7 @@ var recipient *openpgp.Entity
 var ctx context.Context
 var bucket *storage.BucketHandle
 var bucketAttrs *storage.BucketAttrs
+var keyEncryptionKey []byte
 
 func sendResponse(response map[string]interface{}, httpStatus int, w http.ResponseWriter) {
 	js, err := json.Marshal(response)
@@ -42,7 +45,8 @@ func sendResponse(response map[string]interface{}, httpStatus int, w http.Respon
 }
 
 func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string, encryptionType string, passphrase string) (err error) {
-	data := fileBytes
+	var data []byte
+	var encryptedKey []byte
 	switch encryptionType {
 
 	case "pubkey":
@@ -60,12 +64,25 @@ func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, g
 			return
 		}
 	case "plain":
-		log.Debugf("Encrypting data with symmetric key ...")
-		data, err = encryption.AES256(fileBytes, passphrase)
+		log.Debugf("AES256 encrypting data with symmetric key ...")
+		var fileKey []byte
+		fileKey, err = encryption.GenerateAES256Key()
+		if err != nil {
+			log.Errorf("Didn't get key for the file: %s", err)
+			return
+		}
+		data, err = encryption.AES256(fileBytes, fileKey)
 		if err != nil {
 			log.Errorf("Encryption failed: %s", err)
 			return
 		}
+		encryptedKey, err = encryption.AES256(fileKey, keyEncryptionKey)
+		if err != nil {
+			log.Errorf("Couldn't encrypt file key: %s", err)
+			return
+		}
+		log.Debugf("encrypted key: %s", base64.StdEncoding.EncodeToString(encryptedKey))
+		customMetadata["_encryptedKey"] = base64.StdEncoding.EncodeToString(encryptedKey)
 	default:
 		log.Debugf("Skipping encryption ...")
 	}
@@ -82,6 +99,10 @@ func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, g
 
 func uploadFile(w http.ResponseWriter, r *http.Request) {
 	log.Debugf("File Upload Endpoint Hit")
+
+	vars := mux.Vars(r)
+	log.Debugf("Path: %s", vars["path"])
+	gcsObjectName := vars["path"]
 
 	// Parse our multipart form, 10 << 20 specifies a maximum
 	// upload of 10 MB files.
@@ -102,14 +123,6 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gcsObjectName := r.Header.Get("Object-Name")
-	if gcsObjectName == "" {
-		gcsObjectName = fmt.Sprintf("%x", sha256.Sum256(fileBytes))
-	}
-	gcsObjectPath := r.Header.Get("Object-Path")
-	if gcsObjectPath != "" {
-		gcsObjectName = strings.TrimPrefix(gcsObjectPath, "/") + "/" + gcsObjectName
-	}
 	customMetadata := make(map[string]string)
 	for k, values := range r.Header {
 		if strings.HasPrefix(k, "__") {
@@ -128,16 +141,6 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	switch encryptionType {
 	case "none":
 	case "plain":
-		symmkey = r.Header.Get("Symmkey")
-		if symmkey == "" {
-			log.Errorf("No value for 'Symmkey'")
-			response = map[string]interface{}{
-				"status":  "missing_parameters",
-				"details": "'Symmkey' not specified",
-			}
-			sendResponse(response, http.StatusBadRequest, w)
-			return
-		}
 	case "pubkey":
 	case "symmetric":
 		symmkey = r.Header.Get("Symmkey")
@@ -192,15 +195,43 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+func getFile(w http.ResponseWriter, r *http.Request) {
+	log.Debugf("Get File Endpoint Hit")
+
+	vars := mux.Vars(r)
+	log.Debugf("Path: %s", vars["path"])
+
+	data := gcs.ReadFile(ctx, bucket, vars["path"])
+
+	if data != nil {
+		log.Debugf("Request processed")
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Disposition", "attachment; filename="+path.Base(vars["path"]))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.Write(data)
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+	}
+
+}
+
 func main() {
 	loggo.ConfigureLoggers(env.GetenvDefault("LOGGING_CONFIG", "main=DEBUG"))
 
 	rec, err := encryption.ReadEntity(env.GetenvDefault("PGP_PUBLIC_KEY", "/tmp/pubKey.asc"))
 	if err != nil {
-		log.Errorf("Could not read publik key: %s", err)
+		log.Errorf("Could not read public key: %s", err)
 		os.Exit(3)
 	}
 	recipient = rec
+
+	keyEncryptionKey, err = encryption.GenerateAES256Key()
+	if err != nil {
+		log.Errorf("Could not generate key: %s", err)
+		os.Exit(4)
+	}
+	log.Infof("Generated key: %s", base64.StdEncoding.EncodeToString(keyEncryptionKey))
 
 	ctx = context.Background()
 	//	_, objAttrs, err := upload(ctx, r, projectID, bucket, name, public)
@@ -226,6 +257,7 @@ func main() {
 
 	log.Debugf("starting server ...")
 	router := mux.NewRouter().StrictSlash(true)
-	router.HandleFunc("/upload", uploadFile).Methods("POST")
+	router.HandleFunc("/{path:.*}", uploadFile).Methods("POST")
+	router.HandleFunc("/{path:.*}", getFile).Methods("GET")
 	http.ListenAndServe(fmt.Sprintf("%s:%s", env.GetenvDefault("LISTEN_ADDRESS", "127.0.0.1"), env.GetenvDefault("LISTEN_PORT", "8080")), router)
 }
