@@ -17,15 +17,12 @@ import (
 	"../libs/env"
 	"../libs/gcs"
 
-	"golang.org/x/crypto/openpgp"
-
 	"cloud.google.com/go/storage"
 	"github.com/gorilla/mux"
 	"github.com/juju/loggo"
 )
 
 var log = loggo.GetLogger("main")
-var recipient *openpgp.Entity
 var ctx context.Context
 var bucket *storage.BucketHandle
 var bucketAttrs *storage.BucketAttrs
@@ -175,14 +172,7 @@ func getFile(w http.ResponseWriter, r *http.Request) {
 func main() {
 	loggo.ConfigureLoggers(env.GetenvDefault("LOGGING_CONFIG", "main=DEBUG"))
 
-	rec, err := encryption.ReadEntity(env.GetenvDefault("PGP_PUBLIC_KEY", "/tmp/pubKey.asc"))
-	if err != nil {
-		log.Errorf("Could not read public key: %s", err)
-		os.Exit(3)
-	}
-	recipient = rec
-
-	keyEncryptionKey, err = encryption.GenerateAES256Key()
+	keyEncryptionKey, err := encryption.GenerateAES256Key()
 	if err != nil {
 		log.Errorf("Could not generate key: %s", err)
 		os.Exit(4)
