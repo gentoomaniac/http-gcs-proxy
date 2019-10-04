@@ -151,17 +151,16 @@ func getFile(w http.ResponseWriter, r *http.Request) {
 
 	if data != nil {
 		log.Debugf("Request processed")
-		w.WriteHeader(http.StatusOK)
-		for k, v := range metadata {
-			log.Debugf("Metadata: %s - %s", k, v)
-			if strings.HasPrefix(k, "__") {
-				log.Debugf("Set header: %s", strings.ReplaceAll(k, "__", ""))
-				w.Header().Set(strings.ReplaceAll(k, "__", ""), v)
-			}
-		}
+
 		w.Header().Set("Content-Disposition", "attachment; filename="+path.Base(vars["path"]))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		for k, v := range metadata {
+			if strings.HasPrefix(k, "__") {
+				w.Header().Set(strings.ReplaceAll(k, "__", ""), v)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
 		w.Write(data)
 	} else {
 		w.WriteHeader(http.StatusNotFound)
