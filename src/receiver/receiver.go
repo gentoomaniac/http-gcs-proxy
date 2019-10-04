@@ -44,48 +44,30 @@ func sendResponse(response map[string]interface{}, httpStatus int, w http.Respon
 	w.Write(js)
 }
 
-func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string, encryptionType string, passphrase string) (err error) {
+func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) (err error) {
 	var data []byte
 	var encryptedKey []byte
-	switch encryptionType {
 
-	case "pubkey":
-		log.Debugf("Encrypting data with gpg pubkey ...")
-		data, err = encryption.PgpPubkey(fileBytes, []*openpgp.Entity{recipient}, nil)
-		if err != nil {
-			log.Errorf("Encryption failed: %s", err)
-			return
-		}
-	case "symmetric":
-		log.Debugf("Encrypting data with gpg symmetric key ...")
-		data, err = encryption.PgpSymmetric(fileBytes, passphrase)
-		if err != nil {
-			log.Errorf("Encryption failed: %s", err)
-			return
-		}
-	case "plain":
-		log.Debugf("AES256 encrypting data with symmetric key ...")
-		var fileKey []byte
-		fileKey, err = encryption.GenerateAES256Key()
-		if err != nil {
-			log.Errorf("Didn't get key for the file: %s", err)
-			return
-		}
-		data, err = encryption.AES256(fileBytes, fileKey)
-		if err != nil {
-			log.Errorf("Encryption failed: %s", err)
-			return
-		}
-		encryptedKey, err = encryption.AES256(fileKey, keyEncryptionKey)
-		if err != nil {
-			log.Errorf("Couldn't encrypt file key: %s", err)
-			return
-		}
-		log.Debugf("encrypted key: %s", base64.StdEncoding.EncodeToString(encryptedKey))
-		customMetadata["_encryptedKey"] = base64.StdEncoding.EncodeToString(encryptedKey)
-	default:
-		log.Debugf("Skipping encryption ...")
+	log.Debugf("AES256 encrypting data with symmetric key ...")
+	var fileKey []byte
+	fileKey, err = encryption.GenerateAES256Key()
+	if err != nil {
+		log.Errorf("Didn't get key for the file: %s", err)
+		return
 	}
+	data, err = encryption.AES256(fileBytes, fileKey)
+	if err != nil {
+		log.Errorf("Encryption failed: %s", err)
+		return
+	}
+	encryptedKey, err = encryption.AES256(fileKey, keyEncryptionKey)
+	if err != nil {
+		log.Errorf("Couldn't encrypt file key: %s", err)
+		return
+	}
+	log.Debugf("key: %s", base64.StdEncoding.EncodeToString(fileKey))
+	log.Debugf("encrypted key: %s", base64.StdEncoding.EncodeToString(encryptedKey))
+	customMetadata["__encryptedKey"] = base64.StdEncoding.EncodeToString(encryptedKey)
 
 	log.Debugf("Uploading object: %s", gcsObjectName)
 	_, _, err = gcs.SendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(data), customMetadata, false)
@@ -136,43 +118,10 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{}
-	encryptionType := strings.ToLower(r.Header.Get("Encryption-Type"))
-	symmkey := ""
-	switch encryptionType {
-	case "none":
-	case "plain":
-	case "pubkey":
-	case "symmetric":
-		symmkey = r.Header.Get("Symmkey")
-		if symmkey == "" {
-			log.Errorf("No value for 'Symmkey'")
-			response = map[string]interface{}{
-				"status":  "missing_parameters",
-				"details": "'Symmkey' not specified",
-			}
-			sendResponse(response, http.StatusBadRequest, w)
-			return
-		}
-	case "":
-		log.Errorf("No value for 'Encryption-Type'")
-		response = map[string]interface{}{
-			"status":  "missing_parameters",
-			"details": "'Encryption-Type' not specified",
-		}
-		sendResponse(response, http.StatusBadRequest, w)
-		return
-	default:
-		log.Errorf("Value for 'Encryption-Type' invalid value: %s", encryptionType)
-		response = map[string]interface{}{
-			"status":  "not_supported",
-			"details": "Value for 'Encryption-Type' not supported",
-		}
-		sendResponse(response, http.StatusBadRequest, w)
-		return
-	}
+
 	asyncUpload := r.Header.Get("Async-processing")
 	if asyncUpload == "true" {
-		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName, encryptionType, symmkey)
+		go encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
 		response = map[string]interface{}{
 			"status":     "started",
 			"details":    "upload in progress",
@@ -182,7 +131,7 @@ func uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 		sendResponse(response, http.StatusOK, w)
 	} else {
-		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName, encryptionType, symmkey)
+		encryptAndUploadAsync(fileBytes, customMetadata, gcsObjectName)
 		response = map[string]interface{}{
 			"status":     "success",
 			"details":    "file successfully uploaded",
@@ -201,11 +150,18 @@ func getFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	log.Debugf("Path: %s", vars["path"])
 
-	data := gcs.ReadFile(ctx, bucket, vars["path"])
+	data, metadata := gcs.ReadFile(ctx, bucket, vars["path"])
 
 	if data != nil {
 		log.Debugf("Request processed")
 		w.WriteHeader(http.StatusOK)
+		for k, v := range metadata {
+			log.Debugf("Metadata: %s - %s", k, v)
+			if strings.HasPrefix(k, "__") {
+				log.Debugf("Set header: %s", strings.ReplaceAll(k, "__", ""))
+				w.Header().Set(strings.ReplaceAll(k, "__", ""), v)
+			}
+		}
 		w.Header().Set("Content-Disposition", "attachment; filename="+path.Base(vars["path"]))
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
