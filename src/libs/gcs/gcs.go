@@ -42,18 +42,19 @@ func SendToGCS(ctx context.Context, bucketObject *storage.BucketHandle, objectNa
 }
 
 // readFile reads the named file in Google Cloud Storage.
-func ReadFile(ctx context.Context, bucketObject *storage.BucketHandle, fileName string) []byte {
+func ReadFile(ctx context.Context, bucketObject *storage.BucketHandle, fileName string) ([]byte, map[string]string) {
 	rc, err := bucketObject.Object(fileName).NewReader(ctx)
 	if err != nil {
 		log.Errorf("unable to open file from bucket: %s, %v", fileName, err)
-		return nil
+		return nil, nil
 	}
 	defer rc.Close()
 	data, err := ioutil.ReadAll(rc)
 	if err != nil {
 		log.Errorf("unable to read data from bucket: %s, %v", fileName, err)
-		return nil
+		return nil, nil
 	}
+	attrs, _ := bucketObject.Object(fileName).Attrs(ctx)
 
-	return data
+	return data, attrs.Metadata
 }
