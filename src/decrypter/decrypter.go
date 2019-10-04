@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
-	"encoding/hex"
 	"io/ioutil"
 	"os"
 
@@ -25,10 +24,10 @@ func getenv(name string, defaultValue string) string {
 var (
 	verbose = kingpin.Flag("verbose", "Verbose mode.").Short('v').Bool()
 	secret  = kingpin.Flag("secret", "Secret").Short('s').Required().String()
+	nonce   = kingpin.Flag("nonce", "Secret").Short('n').Required().String()
 )
 
-func decrypt(ciphertext []byte, key []byte) (decryptedData []byte) {
-	nonce, _ := hex.DecodeString("64a9433eae7ccceee2fc0eda")
+func decrypt(ciphertext []byte, key []byte, nonce []byte) (decryptedData []byte) {
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -55,5 +54,6 @@ func main() {
 
 	encryptedData, _ := ioutil.ReadAll(os.Stdin)
 	key, _ := base64.StdEncoding.DecodeString(*secret)
-	os.Stdout.Write(decrypt(encryptedData, key))
+	iv, _ := base64.StdEncoding.DecodeString(*nonce)
+	os.Stdout.Write(decrypt(encryptedData, key, iv))
 }

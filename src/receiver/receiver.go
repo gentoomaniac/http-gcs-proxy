@@ -41,30 +41,33 @@ func sendResponse(response map[string]interface{}, httpStatus int, w http.Respon
 	w.Write(js)
 }
 
-func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) (err error) {
-	var data []byte
-	var encryptedKey []byte
-
+func encryptAndUploadAsync(fileBytes []byte, customMetadata map[string]string, gcsObjectName string) {
 	log.Debugf("AES256 encrypting data with symmetric key ...")
-	var fileKey []byte
-	fileKey, err = encryption.GenerateAES256Key()
+	fileKey, err := encryption.GenerateAES256Key()
 	if err != nil {
 		log.Errorf("Didn't get key for the file: %s", err)
 		return
 	}
-	data, err = encryption.AES256(fileBytes, fileKey)
-	if err != nil {
-		log.Errorf("Encryption failed: %s", err)
-		return
-	}
-	encryptedKey, err = encryption.AES256(fileKey, keyEncryptionKey)
-	if err != nil {
-		log.Errorf("Couldn't encrypt file key: %s", err)
-		return
-	}
 	log.Debugf("key: %s", base64.StdEncoding.EncodeToString(fileKey))
+
+	iv, _ := encryption.GenerateIV()
+	log.Debugf("iv: %s", base64.StdEncoding.EncodeToString(iv))
+
+	data, err := encryption.AES256(fileBytes, fileKey, iv)
+	if err != nil {
+		log.Errorf("Data encryption failed: %s", err)
+		return
+	}
+
+	encryptedKey, err := encryption.AES256(fileKey, keyEncryptionKey, iv)
+	if err != nil {
+		log.Errorf("Key encription failed: %s", err)
+		return
+	}
 	log.Debugf("encrypted key: %s", base64.StdEncoding.EncodeToString(encryptedKey))
+
 	customMetadata["__encryptedKey"] = base64.StdEncoding.EncodeToString(encryptedKey)
+	customMetadata["__iv"] = base64.StdEncoding.EncodeToString(iv)
 
 	log.Debugf("Uploading object: %s", gcsObjectName)
 	_, _, err = gcs.SendToGCS(ctx, bucket, gcsObjectName, bytes.NewBuffer(data), customMetadata, false)
@@ -171,11 +174,12 @@ func getFile(w http.ResponseWriter, r *http.Request) {
 func main() {
 	loggo.ConfigureLoggers(env.GetenvDefault("LOGGING_CONFIG", "main=DEBUG"))
 
-	keyEncryptionKey, err := encryption.GenerateAES256Key()
+	masterKey, err := encryption.GenerateAES256Key()
 	if err != nil {
 		log.Errorf("Could not generate key: %s", err)
 		os.Exit(4)
 	}
+	keyEncryptionKey = masterKey
 	log.Infof("Generated key: %s", base64.StdEncoding.EncodeToString(keyEncryptionKey))
 
 	ctx = context.Background()
